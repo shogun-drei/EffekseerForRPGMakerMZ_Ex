@@ -32,7 +32,12 @@
  * @param DistortionEnabled
  * @desc Enables/disables effect distortion.
  * @type boolean
- * @default false
+ * @default true
+ * 
+ * @param DepthEnabled
+ * @desc Corrects 3D model display using depth. Unofficial patch, disable if issues.
+ * @type boolean
+ * @default true
  * 
  */
 /*:ja
@@ -60,17 +65,92 @@
  * @param DistortionEnabled
  * @desc エフェクトの歪みを有効にするかどうか。
  * @type boolean
- * @default false
+ * @default true
+ * 
+ * @param DepthEnabled
+ * @desc Corrects 3D model display using depth. Unofficial patch, disable if issues.
+ * @type boolean
+ * @default true
  * 
  */
 
 (() => {
     'use strict'
     var pluginName = 'EffekseerForRPGMakerMZ_Ex';
+    var pluginParameters = PluginManager.parameters(pluginName);
 
-    var paramInstanceMaxCount = Number(PluginManager.parameters(pluginName)['InstanceMaxCount']);
-    var paramSquareMaxCount = Number(PluginManager.parameters(pluginName)['SquareMaxCount']);
-    var isDistortionEnabled = PluginManager.parameters(pluginName)['DistortionEnabled'] != "false";
+    var paramInstanceMaxCount = Number(pluginParameters['InstanceMaxCount']);
+    var paramSquareMaxCount = Number(pluginParameters['SquareMaxCount']);
+    var isDistortionEnabled = pluginParameters['DistortionEnabled'] != "false";
+    var isDepthEnabled = pluginParameters['DepthEnabled'] != "false";
+
+    const EffekseerDepthBufferManager = {
+        clearDepth: function (gl) {
+            const previousDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+            const previousClearDepth = gl.getParameter(gl.DEPTH_CLEAR_VALUE);
+            const previousScissorTest = gl.isEnabled(gl.SCISSOR_TEST);
+
+            gl.depthMask(true);
+            gl.clearDepth(1);
+            if (previousScissorTest) {
+                gl.disable(gl.SCISSOR_TEST);
+            }
+            gl.clear(gl.DEPTH_BUFFER_BIT);
+            if (previousScissorTest) {
+                gl.enable(gl.SCISSOR_TEST);
+            }
+            gl.clearDepth(previousClearDepth);
+            gl.depthMask(previousDepthMask);
+        },
+
+        ensureForCurrentFramebuffer: function (renderer) {
+            const gl = renderer && renderer.gl;
+            const framebufferSystem = renderer && renderer.framebuffer;
+
+            if (!gl || !framebufferSystem) {
+                return;
+            }
+
+            const framebuffer = framebufferSystem.current;
+            const previousViewport = gl.getParameter(gl.VIEWPORT);
+
+            
+            if (framebuffer &&
+                framebuffer !== framebufferSystem.unknownFramebuffer &&
+                !framebuffer.depth &&
+                !framebuffer.depthTexture &&
+                framebuffer.enableDepth) {
+                framebuffer.enableDepth();
+                framebufferSystem.bind(framebuffer);
+                gl.viewport(
+                    previousViewport[0],
+                    previousViewport[1],
+                    previousViewport[2],
+                    previousViewport[3]
+                );
+            }
+            
+
+            this.clearDepth(gl);
+        },
+
+        wrapContext: function (effekseerContext, renderer) {
+            if (!effekseerContext || effekseerContext._rmmzDepthBufferWrapped) {
+                return;
+            }
+
+            const realBeginDraw = effekseerContext.beginDraw;
+            if (!realBeginDraw) {
+                return;
+            }
+
+            effekseerContext.beginDraw = function () {
+                EffekseerDepthBufferManager.ensureForCurrentFramebuffer(renderer);
+                return realBeginDraw.apply(this, arguments);
+            };
+            effekseerContext._rmmzDepthBufferWrapped = true;
+        }
+    };
 
     Graphics._createEffekseerContext = function () {
         if (this._app && window.effekseer) {
@@ -81,6 +161,9 @@
                 this._effekseer = effekseer.createContext();
                 if (this._effekseer) {
                     this._effekseer.init(this._app.renderer.gl, { instanceMaxCount: actualInstanceMaxCount, squareMaxCount: actualSquareMaxCount });
+                    if (isDepthEnabled) {
+                        EffekseerDepthBufferManager.wrapContext(this._effekseer, this._app.renderer);
+                    }
                 }
 
                 // restore OpenGL states with pixi.js functions
